@@ -66,7 +66,7 @@ float energyCalculation(std::string& aminoAcids, Solution& element) {
     for (int i = 0; i < element.xThetas.size(); i++) {
         resultOne += (1 - cosf(element.xThetas[i]));
     }
-    resultOne /= 4.f;
+    resultOne /= 4;
 
     std::vector<Coordinates> allCoords(element.xThetas.size() + 2);
     for (int i = 0; i < element.xThetas.size() + 2; i++) {
@@ -84,22 +84,23 @@ float energyCalculation(std::string& aminoAcids, Solution& element) {
             resultTwo += (inv12 - c(aminoAcids[i], aminoAcids[j]) * inv6);
         }
     }
-    return resultOne + resultTwo * 4.f;
+    return resultOne + resultTwo * 4;
 }
 
 void calculateSeedEnergy() {
-    std::atomic<unsigned int> bestEnergy, nFesCounter;
-    Solution sol;
+    Solution sol, u, uNew;
     Solution* populationCurrGen = new Solution[np];
     std::uniform_real_distribution<float> float_dist(0.f, 1.f);
     std::uniform_int_distribution<int> int_dist_np(0, static_cast<int>(np - 1));
     std::uniform_int_distribution<int> int_dist_d(0, static_cast<int>(aminoAcids.size() - 1));
+    unsigned int bestEnergy, nFesCounter, r1, r2, r3, rBest, jRand;
+    float tmp, randomValue;
 
     while (true) {
         int currentSeed = atomicInt.fetch_add(1);
-        if (currentSeed > expRuns) break;
+        if (currentSeed > expRuns - 1) break;
 
-        unsigned int bestEnergy = nFesCounter = 0;
+        bestEnergy = nFesCounter = 0;
         std::mt19937 gen(currentSeed + seed);
         auto randFloat0To1 = [&]() { return float_dist(gen); };
         auto randFloatNp = [&]() { return int_dist_np(gen); };
@@ -128,17 +129,14 @@ void calculateSeedEnergy() {
             populationCurrGen[i] = sol;
             nFesCounter++;
         }
-        Solution u, uNew;
-        unsigned int r1, r2, r3, rBest, jRand;
         rBest = 0;
-        float tmp;
         while (elapsed_ms <= runtimeLmt && nFesCounter <= nFesLmt) {
             now = std::chrono::high_resolution_clock::now();
             elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
             for (unsigned int i = 0; i < np; i++) {
                 u = Solution();
 
-                float randomValue = randFloat0To1();
+                randomValue = randFloat0To1();
                 if (randomValue < 0.1) F = 0.1f + 0.9f * randomValue;
                 else F = populationCurrGen[i].F;
 
@@ -272,7 +270,9 @@ int main(int argc, char* argv[]) {
 
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    std::cout << "Duration for all 50 seeds using " << expThreads << " threads:" << duration << std::endl;
+    std::cout << "Duration for all " << expRuns << " seeds, starting from " << seed 
+        << " to " << seed + expRuns - 1 << " using " << expThreads << " threads:" 
+        << duration << std::endl;
 
     for (const auto& result : results) {
         int firstInt = std::get<0>(result);
@@ -280,7 +280,6 @@ int main(int argc, char* argv[]) {
         float firstFloat = std::get<2>(result);
         float secondFloat = std::get<3>(result);
 
-        // Print the values
         std::cout << "Seed: " << firstInt << ", nFes: " << secondInt << ", energy: "
             << firstFloat << ", duration: " << secondFloat << "\n";
     }
