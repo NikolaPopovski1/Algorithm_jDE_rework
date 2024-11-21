@@ -87,22 +87,23 @@ float energyCalculation(std::string& aminoAcids, Solution& element) {
     return resultOne + resultTwo * 4;
 }
 
-void calculateSeedEnergy() {
+void calculateSeedEnergy(
+    std::uniform_real_distribution<float> float_dist_0_to_1,
+    std::uniform_real_distribution<int> int_dist_np,
+    std::uniform_real_distribution<int> int_dist_d
+) {
     Solution sol, u, uNew;
     Solution* populationCurrGen = new Solution[np];
-    std::uniform_real_distribution<float> float_dist(0.f, 1.f);
-    std::uniform_int_distribution<int> int_dist_np(0, static_cast<int>(np - 1));
-    std::uniform_int_distribution<int> int_dist_d(0, static_cast<int>(aminoAcids.size() - 1));
     unsigned int bestEnergy, nFesCounter, r1, r2, r3, rBest, jRand;
     float tmp, randomValue;
 
     while (true) {
-        int currentSeed = atomicInt.fetch_add(1);
+        unsigned int currentSeed = atomicInt.fetch_add(1);
         if (currentSeed > expRuns - 1) break;
 
         bestEnergy = nFesCounter = 0;
         std::mt19937 gen(currentSeed + seed);
-        auto randFloat0To1 = [&]() { return float_dist(gen); };
+        auto randFloat0To1 = [&]() { return float_dist_0_to_1(gen); };
         auto randFloatNp = [&]() { return int_dist_np(gen); };
         auto randIntD = [&]() { return int_dist_d(gen); };
 
@@ -260,8 +261,11 @@ int main(int argc, char* argv[]) {
     auto start = std::chrono::high_resolution_clock::now();
 
     std::vector<std::thread> threads;
-    for (int i = 0; i < expThreads; i++) {
-        threads.push_back(std::thread(calculateSeedEnergy));
+    static std::uniform_real_distribution<float> float_dist_0_to_1(0.0f, 1.0f);
+    static std::uniform_int_distribution<int> int_dist_np(0, static_cast<int>(np - 1));
+    static std::uniform_int_distribution<int> int_dist_d(0, static_cast<int>(aminoAcids.size() - 1));
+    for (unsigned int i = 0; i < expThreads; i++) {
+        threads.push_back(std::thread(calculateSeedEnergy, float_dist_0_to_1, int_dist_np, int_dist_d));
     }
 
     for (auto& t : threads) {
