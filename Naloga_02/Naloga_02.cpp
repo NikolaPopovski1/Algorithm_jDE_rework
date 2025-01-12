@@ -4,6 +4,8 @@
 #include <chrono>
 #include <cmath>
 #include <random>
+#include <mpi.h>
+#include <atomic>
 
 #ifndef M_PI
 #define M_PI 3.1415926f
@@ -12,12 +14,13 @@
 constexpr const float XjL = -(float)M_PI;
 constexpr const float XjU = (float)M_PI;
 constexpr const float epsilon = (float)1e-6;
+const int MESSAGE_TAG = 0;
 
 std::string aminoAcids;
-static unsigned int seed, nFesLmt, runtimeLmt, expRuns, np, expThreads;
+static unsigned int seed, nFesLmt, runtimeLmt, expRuns, np, expThreads, numOfNodes;
 static std::atomic<int> atomicInt = 0;
 static float target, F, Cr;
-std::vector<std::tuple<int, int, float, float>> results;
+std::tuple<int, int, float, float> result;
 
 struct Solution {
     std::vector<float> xThetas;
@@ -87,7 +90,8 @@ float energyCalculation(std::string& aminoAcids, Solution& element) {
     return resultOne + resultTwo * 4;
 }
 
-void calculateSeedEnergy() {
+std::tuple<int, int, float, float> calculateSeedEnergy(int seedSend) {
+	seed = seedSend;
     Solution sol, u, uNew;
     Solution* populationCurrGen = new Solution[np];
     std::uniform_real_distribution<float> float_dist(0.f, 1.f);
@@ -210,7 +214,7 @@ void calculateSeedEnergy() {
                 }
             }
             bestEnergy = rBest;
-
+            
             if (populationCurrGen[rBest].energy <= target + epsilon && populationCurrGen[rBest].energy >= target + epsilon) break;
         }
 
@@ -222,12 +226,86 @@ void calculateSeedEnergy() {
 
 
         std::tuple<int, int, float, float> seedVals(currentSeed + seed, nFesCounter, populationCurrGen[bestEnergy].energy, duration);
-        results.push_back(seedVals);
+		result = seedVals;
     }
 
     delete[] populationCurrGen;
+
+	return result;
 }
 
+void serverLogic(unsigned int expRunsInner) {
+	std::cout << "Server logic..." << std::endl;
+    const int max_message_length = 256;
+    char message[max_message_length];
+    int src;
+    MPI_Status status;
+
+
+    for (src = 1; src < expRunsInner + 1; src++) {
+        MPI_Recv(message, max_message_length, MPI_CHAR,
+            MPI_ANY_SOURCE, MESSAGE_TAG,
+            MPI_COMM_WORLD, &status);
+        std::cout << message << std::endl;
+    }
+}
+
+void clientLogic(int rank, int num_procs, int expRuns) {
+	std::cout << "Client logic for node: " << rank << std::endl;
+    bool isNoDif = expRuns % num_procs == 0;
+    int numOfRunsForNode = static_cast<int>(expRuns / num_procs);
+	int start = 0, finish = 0;
+    if (isNoDif) {
+		start = seed + numOfRunsForNode * (rank - 1);
+		finish = seed + numOfRunsForNode * rank;
+	}
+
+	else if (!isNoDif && rank != num_procs)
+	{
+        start = seed + numOfRunsForNode * (rank - 1);
+        finish = seed + numOfRunsForNode * rank;
+    }
+	else if (!isNoDif && rank == num_procs)
+    {
+        start = seed + numOfRunsForNode * (rank - 1);
+        finish = seed + expRuns;
+    }
+    else {
+		std::cout << "Error: Something went wrong..." << std::endl;
+		throw std::runtime_error("Error: Something went wrong...");
+    }
+
+    const int max_message_length = 256;
+    char message[max_message_length];
+    std::vector <std::tuple<int, int, float, float>> results;
+
+	std::tuple<int, int, float, float> send;
+    for (int i = start; i < finish; i++) {
+        seed = i;
+		std::cout << "Seed: " << seed << std::endl;
+        send = calculateSeedEnergy(seed);
+
+        int firstInt = std::get<0>(send);
+        int secondInt = std::get<1>(send);
+        float firstFloat = std::get<2>(send);
+        float secondFloat = std::get<3>(send);
+
+        snprintf(message, sizeof(message), "MS: %d, From node: %d, Seed: %d, nFes: %d, energy: %.2f, duration: %.2f\n", sizeof(message), rank, firstInt, secondInt, firstFloat, secondFloat);
+
+        MPI_Send(message, strlen(message) + 1, MPI_CHAR, 0, MESSAGE_TAG, MPI_COMM_WORLD);
+    }
+
+    /*for (const auto& result : results) {
+        int firstInt = std::get<0>(result);
+        int secondInt = std::get<1>(result);
+        float firstFloat = std::get<2>(result);
+        float secondFloat = std::get<3>(result);
+
+        snprintf(message, sizeof(message), "MS: %d, From node: %d, Seed: %d, nFes: %d, energy: %.2f, duration: %.2f\n", sizeof(message), rank, firstInt, secondInt, firstFloat, secondFloat);
+
+        MPI_Send(message, strlen(message) + 1, MPI_CHAR, 0, MESSAGE_TAG, MPI_COMM_WORLD);
+    }*/
+}
 int main(int argc, char* argv[]) {
     try {
         for (int i = 1; i < argc; i++) {
@@ -257,32 +335,29 @@ int main(int argc, char* argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    auto start = std::chrono::high_resolution_clock::now();
+    MPI_Init(&argc, &argv);
+    int rank, num_procs;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
+	std::cout << "Rank: " << rank << ", Num_procs: " << num_procs << std::endl;
+    if (rank == 0) { // server logic
+		std::cout << "Start timer..." << std::endl;
+        auto start = std::chrono::high_resolution_clock::now();
 
-    std::vector<std::thread> threads;
-    for (int i = 0; i < expThreads; i++) {
-        threads.push_back(std::thread(calculateSeedEnergy));
+        serverLogic(expRuns);
+
+        std::cout << "End timer..." << std::endl;
+        auto end = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+        std::cout << "Duration for all " << expRuns << " seeds, starting from " << seed
+            << " to " << seed + expRuns - 1 << " using " << num_procs << " mpi nodes?:"
+            << duration << std::endl;
+    } else { // client logic
+        std::cout << "Into else statement for client..." << std::endl;
+        clientLogic(rank, num_procs - 1, expRuns);
     }
 
-    for (auto& t : threads) {
-        t.join();
-    }
+	MPI_Finalize();
 
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    std::cout << "Duration for all " << expRuns << " seeds, starting from " << seed 
-        << " to " << seed + expRuns - 1 << " using " << expThreads << " threads:" 
-        << duration << std::endl;
-
-    for (const auto& result : results) {
-        int firstInt = std::get<0>(result);
-        int secondInt = std::get<1>(result);
-        float firstFloat = std::get<2>(result);
-        float secondFloat = std::get<3>(result);
-
-        std::cout << "Seed: " << firstInt << ", nFes: " << secondInt << ", energy: "
-            << firstFloat << ", duration: " << secondFloat << "\n";
-    }
-   
     return 0;
 }
