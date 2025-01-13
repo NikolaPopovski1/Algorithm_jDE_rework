@@ -14,10 +14,9 @@
 constexpr const float XjL = -(float)M_PI;
 constexpr const float XjU = (float)M_PI;
 constexpr const float epsilon = (float)1e-6;
-const int MESSAGE_TAG = 0;
 
 std::string aminoAcids;
-static unsigned int seed, nFesLmt, runtimeLmt, expRuns, np, expThreads, numOfNodes;
+static unsigned int seedStarter, nFesLmt, runtimeLmt, expRuns, np, expThreads, numOfNodes;
 static std::atomic<int> atomicInt = 0;
 static float target, F, Cr;
 std::tuple<int, int, float, float> result;
@@ -91,7 +90,7 @@ float energyCalculation(std::string& aminoAcids, Solution& element) {
 }
 
 std::tuple<int, int, float, float> calculateSeedEnergy(int seedSend) {
-	seed = seedSend;
+	int seed = seedSend;
     Solution sol, u, uNew;
     Solution* populationCurrGen = new Solution[np];
     std::uniform_real_distribution<float> float_dist(0.f, 1.f);
@@ -234,84 +233,97 @@ std::tuple<int, int, float, float> calculateSeedEnergy(int seedSend) {
 	return result;
 }
 
-void serverLogic(unsigned int expRunsInner) {
-	std::cout << "Server logic..." << std::endl;
-    const int max_message_length = 256;
-    char message[max_message_length];
-    int src;
-    MPI_Status status;
+void serverLogic(int expRunsInner, int num_procs, int seed) {
+    std::cout << "Server logic with seed " << seed << "..." << std::endl;
 
+    bool isNoDif = expRuns % (num_procs - 1) == 0;
+    int numOfRunsForNode = static_cast<int>(expRuns / (num_procs - 1));
+    int start = 0, finish = 0;
+
+    for (int client = 1; client < num_procs; client++) {
+        if (isNoDif) {
+            start = seed + numOfRunsForNode * (client - 1);
+            finish = seed + numOfRunsForNode * client;
+        }
+        else if (!isNoDif && client != num_procs) {
+            start = seed + numOfRunsForNode * (client - 1);
+            finish = seed + numOfRunsForNode * client;
+        }
+        else if (!isNoDif && client == num_procs) {
+            start = seed + numOfRunsForNode * (client - 1);
+            finish = seed + expRuns;
+        }
+        else {
+            std::cout << "Error: Something went wrong..." << std::endl;
+            throw std::runtime_error("Error: Something went wrong...");
+        }
+
+		int message_tag = 0;
+        // Send the energy results for each seed back to the server
+        for (int i = start; i < finish; i++) {
+            int seedToSend = i;
+            MPI_Send(&seedToSend, 1, MPI_INT, client, message_tag, MPI_COMM_WORLD);
+			message_tag++;
+        }
+    }
+
+    const int max_message_length = 256;
+    std::vector<char*> messages;
+	messages.reserve(expRunsInner);
+    int src;
+
+    int message_tag = 0;
+    for (src = 1; src < expRunsInner + 1; src++) {
+        MPI_Status status;
+		char message[max_message_length];
+        MPI_Recv(&message, max_message_length, MPI_CHAR, MPI_ANY_SOURCE, message_tag, MPI_COMM_WORLD, &status);
+        messages[message_tag] = message;
+        message_tag++;
+    }
 
     for (src = 1; src < expRunsInner + 1; src++) {
-        MPI_Recv(message, max_message_length, MPI_CHAR,
-            MPI_ANY_SOURCE, MESSAGE_TAG,
-            MPI_COMM_WORLD, &status);
-        std::cout << message << std::endl;
+        std::cout << messages[src - 1] << std::endl;
     }
 }
 
-void clientLogic(int rank, int num_procs, int expRuns) {
-	std::cout << "Client logic for node: " << rank << std::endl;
-    bool isNoDif = expRuns % num_procs == 0;
-    int numOfRunsForNode = static_cast<int>(expRuns / num_procs);
-	int start = 0, finish = 0;
-    if (isNoDif) {
-		start = seed + numOfRunsForNode * (rank - 1);
-		finish = seed + numOfRunsForNode * rank;
-	}
+void clientLogic(int rank, int num_procs, int expRuns, int seed) {
+    std::cout << "Client logic for node: " << rank << std::endl;
 
-	else if (!isNoDif && rank != num_procs)
-	{
-        start = seed + numOfRunsForNode * (rank - 1);
-        finish = seed + numOfRunsForNode * rank;
-    }
-	else if (!isNoDif && rank == num_procs)
-    {
+    bool isNoDif = expRuns % (num_procs - 1) == 0;
+    int numOfRunsForNode = static_cast<int>(expRuns / (num_procs - 1));
+    int start = 0, finish = 0;
+
+    if (!isNoDif && (rank + 1) == num_procs) {
         start = seed + numOfRunsForNode * (rank - 1);
         finish = seed + expRuns;
     }
     else {
-		std::cout << "Error: Something went wrong..." << std::endl;
-		throw std::runtime_error("Error: Something went wrong...");
+        start = seed + numOfRunsForNode * (rank - 1);
+        finish = seed + numOfRunsForNode * rank;
     }
 
-    const int max_message_length = 256;
-    char message[max_message_length];
-    std::vector <std::tuple<int, int, float, float>> results;
-
-	std::tuple<int, int, float, float> send;
+	int message_tag = 0;
     for (int i = start; i < finish; i++) {
-        seed = i;
-		std::cout << "Seed: " << seed << std::endl;
-        send = calculateSeedEnergy(seed);
+        MPI_Status status;
+        int seedGotten;
+        MPI_Recv(&seedGotten, 1, MPI_INT, 0, message_tag, MPI_COMM_WORLD, &status);  // Receive the seed from server
 
-        int firstInt = std::get<0>(send);
-        int secondInt = std::get<1>(send);
-        float firstFloat = std::get<2>(send);
-        float secondFloat = std::get<3>(send);
-
-        snprintf(message, sizeof(message), "MS: %d, From node: %d, Seed: %d, nFes: %d, energy: %.2f, duration: %.2f\n", sizeof(message), rank, firstInt, secondInt, firstFloat, secondFloat);
-
-        MPI_Send(message, strlen(message) + 1, MPI_CHAR, 0, MESSAGE_TAG, MPI_COMM_WORLD);
+        auto seedEnergy = calculateSeedEnergy(seedGotten);  // Use the received seed
+        char message[256];
+        snprintf(message, sizeof(message), "Seed: %d, nFes: %d, energy: %.6f, duration: %.6f",
+            std::get<0>(seedEnergy), std::get<1>(seedEnergy), std::get<2>(seedEnergy), std::get<3>(seedEnergy));
+        MPI_Send(message, sizeof(message), MPI_CHAR, 0, message_tag, MPI_COMM_WORLD);
+        message_tag++;
     }
 
-    /*for (const auto& result : results) {
-        int firstInt = std::get<0>(result);
-        int secondInt = std::get<1>(result);
-        float firstFloat = std::get<2>(result);
-        float secondFloat = std::get<3>(result);
-
-        snprintf(message, sizeof(message), "MS: %d, From node: %d, Seed: %d, nFes: %d, energy: %.2f, duration: %.2f\n", sizeof(message), rank, firstInt, secondInt, firstFloat, secondFloat);
-
-        MPI_Send(message, strlen(message) + 1, MPI_CHAR, 0, MESSAGE_TAG, MPI_COMM_WORLD);
-    }*/
 }
+
 int main(int argc, char* argv[]) {
     try {
         for (int i = 1; i < argc; i++) {
             std::string arg = argv[i];
             if ((arg[0] == 'A' || arg[0] == 'B')) aminoAcids = argv[i];
-            else if (arg == "-seed") seed = std::stoi(argv[++i]);
+            else if (arg == "-seed") seedStarter = std::stoi(argv[++i]);
             else if (arg == "-target") target = std::stof(argv[++i]);
             else if (arg == "-nfesLmt") nFesLmt = std::stoi(argv[++i]);
             else if (arg == "-runtimeLmt") runtimeLmt = std::stoi(argv[++i]);
@@ -321,7 +333,7 @@ int main(int argc, char* argv[]) {
         }
 
         if (aminoAcids.empty()) throw std::runtime_error("Error: 'aminoAcids' not initialized.");
-        if (!seed) throw std::runtime_error("Error: 'seed' not initialized.");
+        if (!seedStarter) throw std::runtime_error("Error: 'seed' not initialized.");
         if (!target) throw std::runtime_error("Error: 'target' not initialized.");
         if (!nFesLmt) throw std::runtime_error("Error: 'nFesLmt' not initialized.");
         if (!runtimeLmt) throw std::runtime_error("Error: 'runtimeLmt' not initialized.");
@@ -339,25 +351,27 @@ int main(int argc, char* argv[]) {
     int rank, num_procs;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
-	std::cout << "Rank: " << rank << ", Num_procs: " << num_procs << std::endl;
+    std::cout << "Rank: " << rank << ", Num_procs: " << num_procs << std::endl;
+
     if (rank == 0) { // server logic
-		std::cout << "Start timer..." << std::endl;
+        std::cout << "Start timer..." << std::endl;
         auto start = std::chrono::high_resolution_clock::now();
 
-        serverLogic(expRuns);
+        serverLogic(expRuns, num_procs, seedStarter);
 
         std::cout << "End timer..." << std::endl;
         auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-        std::cout << "Duration for all " << expRuns << " seeds, starting from " << seed
-            << " to " << seed + expRuns - 1 << " using " << num_procs << " mpi nodes?:"
-            << duration << std::endl;
-    } else { // client logic
+        std::cout << "Duration for all " << expRuns << " seeds, starting from " << seedStarter
+            << " to " << seedStarter + expRuns - 1 << " using " << num_procs << " mpi nodes: "
+            << duration << "ms" << std::endl;
+    }
+    else { // client logic
         std::cout << "Into else statement for client..." << std::endl;
-        clientLogic(rank, num_procs - 1, expRuns);
+        clientLogic(rank, num_procs, expRuns, seedStarter);
     }
 
-	MPI_Finalize();
+    MPI_Finalize();
 
     return 0;
 }
