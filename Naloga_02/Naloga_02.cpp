@@ -8,7 +8,9 @@
 #include <atomic>
 
 #define MESSAGE_TAG 1
+#define MESSAGE_RECV_TAG 2
 #define SERVER_RANK 0
+#define EXIT_SEED -1
 
 #ifndef M_PI
 #define M_PI 3.1415926f
@@ -242,8 +244,8 @@ void serverLogic(int expRunsInner, int starting_seed, int num_procs_original) {
         i = starting_seed, 
         limit = starting_seed + expRunsInner,
         client;
-	std::vector<std::tuple<int, int, float, float>> results(expRunsInner);
-
+	std::tuple<int, int, float, float> resultPlaceholder;
+    
     // poslje enega po enega, clienta do clienta in tako enakomerno porazdeli
 	while (i < limit) {
 		for (client = 1; client < num_procs_original; client++) {
@@ -253,6 +255,39 @@ void serverLogic(int expRunsInner, int starting_seed, int num_procs_original) {
             if (i >= limit) break;
 		}
 	}
+
+    num_procs_clients =
+        num_procs_original - 1,
+        i = starting_seed,
+        limit = starting_seed + expRunsInner,
+        client;
+    MPI_Status status;
+
+    int rez_seed, rez_nFes;
+    float rez_energy, rez_duration;
+    while (i < limit) {
+        for (client = 1; client < num_procs_original; client++) {
+            MPI_Recv(&resultPlaceholder, sizeof(resultPlaceholder), MPI_BYTE, MPI_ANY_SOURCE, MESSAGE_RECV_TAG, MPI_COMM_WORLD, &status);
+
+            rez_seed = std::get<0>(resultPlaceholder);
+            rez_nFes = std::get<1>(resultPlaceholder);
+            rez_energy = std::get<2>(resultPlaceholder);
+            rez_duration = std::get<3>(resultPlaceholder);
+
+            // Print the values
+            std::string output =
+                "Seed: " + std::to_string(rez_seed)
+                + ", nFes: " + std::to_string(rez_nFes)
+                + ", energy: " + std::to_string(rez_energy)
+                + ", duration: " + std::to_string(rez_duration)
+                + "\n";
+            
+            std::cout << output << std::endl;
+            i++;
+            if (i >= limit) break;
+        }
+    }
+
     // send stop signals
 	for (client = 1; client < num_procs_original; client++) {
 		i = -1;
@@ -261,34 +296,20 @@ void serverLogic(int expRunsInner, int starting_seed, int num_procs_original) {
 }
 
 void clientLogic(int rank, int num_procs_original, int expRuns, int starting_seed) {
-
     int num_procs_clients = num_procs_original - 1;
     int seed_gotten;
     MPI_Status status;
+    int i = 0;
 
-    int rez_seed, rez_nFes;
-    float rez_energy, rez_duration;
 	while (true) {
 		MPI_Recv(&seed_gotten, 1, MPI_INT, SERVER_RANK, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
 		if (seed_gotten == -1) break;
         //std::cout << "Rank " << rank << " pridobil seed: " << seed_gotten << std::endl;
 		auto seedEnergy = calculateSeedEnergy(seed_gotten);
 
-        rez_seed = std::get<0>(result);
-        rez_nFes = std::get<1>(result);
-        rez_energy = std::get<2>(result);
-        rez_duration = std::get<3>(result);
-
-        // Print the values
-        std::string output = 
-            "Seed: " + std::to_string(rez_seed) 
-            + ", nFes: " + std::to_string(rez_nFes) 
-            + ", energy: " + std::to_string(rez_energy)
-            + ", duration: " + std::to_string(rez_duration) 
-            + "\n";
-        std::to_string(std::get<0>(seedEnergy)) + " " + std::to_string(std::get<1>(seedEnergy)) + " " + std::to_string(std::get<2>(seedEnergy)) + " " + std::to_string(std::get<3>(seedEnergy)) + '\n';
-		//MPI_Send(&seedEnergy, sizeof(seedEnergy), MPI_CHAR, 0, MESSAGE_TAG, MPI_COMM_WORLD);
-	}
+        MPI_Send(&seedEnergy, sizeof(seedEnergy), MPI_CHAR, SERVER_RANK, MESSAGE_RECV_TAG, MPI_COMM_WORLD);
+    }
+    //MPI_Send(&EXIT_SEED, 1, MPI_INT, SERVER_RANK, MESSAGE_TAG, MPI_COMM_WORLD);
 }
 
 int main(int argc, char* argv[]) {
