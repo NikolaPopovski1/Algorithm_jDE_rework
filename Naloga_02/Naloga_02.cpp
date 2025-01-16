@@ -257,6 +257,8 @@ void serverLogic(int expRunsInner, int num_procs, int seed) {
             std::cout << "Error: Something went wrong..." << std::endl;
             throw std::runtime_error("Error: Something went wrong...");
         }
+        std::cout << "Start: " << start << ", finish: " << finish << std::endl;
+
 
 		int message_tag = 0;
         // Send the energy results for each seed back to the server
@@ -273,6 +275,7 @@ void serverLogic(int expRunsInner, int num_procs, int seed) {
     int src;
 
     int message_tag = 0;
+    std::cout << "ExpRunsInner: " << expRunsInner << std::endl;
     for (src = 1; src < expRunsInner + 1; src++) {
         MPI_Status status;
 		char message[max_message_length];
