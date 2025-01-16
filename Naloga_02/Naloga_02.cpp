@@ -7,6 +7,9 @@
 #include <mpi.h>
 #include <atomic>
 
+#define MESSAGE_TAG 1
+#define SERVER_RANK 0
+
 #ifndef M_PI
 #define M_PI 3.1415926f
 #endif
@@ -233,92 +236,59 @@ std::tuple<int, int, float, float> calculateSeedEnergy(int seedSend) {
 	return result;
 }
 
-void serverLogic(int expRunsInner, int num_procs, int seed) {
-    std::cout << "Server logic with seed " << seed << "..." << std::endl;
+void serverLogic(int expRunsInner, int starting_seed, int num_procs_original) {
+	int num_procs_clients = 
+        num_procs_original - 1,
+        i = starting_seed, 
+        limit = starting_seed + expRunsInner,
+        client;
+	std::vector<std::tuple<int, int, float, float>> results(expRunsInner);
 
-    bool isNoDif = expRuns % (num_procs - 1) == 0;
-    int numOfRunsForNode = static_cast<int>(expRuns / (num_procs - 1));
-    int start = 0, finish = 0;
-
-    for (int client = 1; client < num_procs; client++) {
-        if (isNoDif) {
-            start = seed + numOfRunsForNode * (client - 1);
-            finish = seed + numOfRunsForNode * client;
-        }
-        else if (!isNoDif && client != num_procs) {
-            start = seed + numOfRunsForNode * (client - 1);
-            finish = seed + numOfRunsForNode * client;
-        }
-        else if (!isNoDif && client == num_procs) {
-            start = seed + numOfRunsForNode * (client - 1);
-            finish = seed + expRuns;
-        }
-        else {
-            std::cout << "Error: Something went wrong..." << std::endl;
-            throw std::runtime_error("Error: Something went wrong...");
-        }
-        std::cout << "Start: " << start << ", finish: " << finish << std::endl;
-
-
-		int message_tag = 0;
-        // Send the energy results for each seed back to the server
-        for (int i = start; i < finish; i++) {
-            int seedToSend = i;
-            MPI_Send(&seedToSend, 1, MPI_INT, client, message_tag, MPI_COMM_WORLD);
-			message_tag++;
-        }
-    }
-
-    const int max_message_length = 256;
-    std::vector<char*> messages;
-	messages.reserve(expRunsInner);
-    int src;
-
-    int message_tag = 0;
-    std::cout << "ExpRunsInner: " << expRunsInner << std::endl;
-    for (src = 1; src < expRunsInner + 1; src++) {
-        MPI_Status status;
-		char message[max_message_length];
-        MPI_Recv(&message, max_message_length, MPI_CHAR, MPI_ANY_SOURCE, message_tag, MPI_COMM_WORLD, &status);
-        messages[message_tag] = message;
-        message_tag++;
-    }
-
-    for (src = 1; src < expRunsInner + 1; src++) {
-        std::cout << messages[src - 1] << std::endl;
-    }
+    // poslje enega po enega, clienta do clienta in tako enakomerno porazdeli
+	while (i < limit) {
+		for (client = 1; client < num_procs_original; client++) {
+			MPI_Send(&i, 1, MPI_INT, client, MESSAGE_TAG, MPI_COMM_WORLD);
+			//std::cout << "Poslal seed: " << i << " clientu: " << client << std::endl;
+            i++;
+            if (i >= limit) break;
+		}
+	}
+    // send stop signals
+	for (client = 1; client < num_procs_original; client++) {
+		i = -1;
+		MPI_Send(&i, 1, MPI_INT, client, MESSAGE_TAG, MPI_COMM_WORLD);
+	}
 }
 
-void clientLogic(int rank, int num_procs, int expRuns, int seed) {
-    std::cout << "Client logic for node: " << rank << std::endl;
+void clientLogic(int rank, int num_procs_original, int expRuns, int starting_seed) {
 
-    bool isNoDif = expRuns % (num_procs - 1) == 0;
-    int numOfRunsForNode = static_cast<int>(expRuns / (num_procs - 1));
-    int start = 0, finish = 0;
+    int num_procs_clients = num_procs_original - 1;
+    int seed_gotten;
+    MPI_Status status;
 
-    if (!isNoDif && (rank + 1) == num_procs) {
-        start = seed + numOfRunsForNode * (rank - 1);
-        finish = seed + expRuns;
-    }
-    else {
-        start = seed + numOfRunsForNode * (rank - 1);
-        finish = seed + numOfRunsForNode * rank;
-    }
+    int rez_seed, rez_nFes;
+    float rez_energy, rez_duration;
+	while (true) {
+		MPI_Recv(&seed_gotten, 1, MPI_INT, SERVER_RANK, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+		if (seed_gotten == -1) break;
+        //std::cout << "Rank " << rank << " pridobil seed: " << seed_gotten << std::endl;
+		auto seedEnergy = calculateSeedEnergy(seed_gotten);
 
-	int message_tag = 0;
-    for (int i = start; i < finish; i++) {
-        MPI_Status status;
-        int seedGotten;
-        MPI_Recv(&seedGotten, 1, MPI_INT, 0, message_tag, MPI_COMM_WORLD, &status);  // Receive the seed from server
+        rez_seed = std::get<0>(result);
+        rez_nFes = std::get<1>(result);
+        rez_energy = std::get<2>(result);
+        rez_duration = std::get<3>(result);
 
-        auto seedEnergy = calculateSeedEnergy(seedGotten);  // Use the received seed
-        char message[256];
-        snprintf(message, sizeof(message), "Seed: %d, nFes: %d, energy: %.6f, duration: %.6f",
-            std::get<0>(seedEnergy), std::get<1>(seedEnergy), std::get<2>(seedEnergy), std::get<3>(seedEnergy));
-        MPI_Send(message, sizeof(message), MPI_CHAR, 0, message_tag, MPI_COMM_WORLD);
-        message_tag++;
-    }
-
+        // Print the values
+        std::string output = 
+            "Seed: " + std::to_string(rez_seed) 
+            + ", nFes: " + std::to_string(rez_nFes) 
+            + ", energy: " + std::to_string(rez_energy)
+            + ", duration: " + std::to_string(rez_duration) 
+            + "\n";
+        std::to_string(std::get<0>(seedEnergy)) + " " + std::to_string(std::get<1>(seedEnergy)) + " " + std::to_string(std::get<2>(seedEnergy)) + " " + std::to_string(std::get<3>(seedEnergy)) + '\n';
+		//MPI_Send(&seedEnergy, sizeof(seedEnergy), MPI_CHAR, 0, MESSAGE_TAG, MPI_COMM_WORLD);
+	}
 }
 
 int main(int argc, char* argv[]) {
@@ -343,7 +313,6 @@ int main(int argc, char* argv[]) {
         if (!np) throw std::runtime_error("Error: 'np' not initialized.");
         if (!expRuns) throw std::runtime_error("Error: 'expRuns' not initialized.");
         if (!expThreads) throw std::runtime_error("Error: 'expThreads' not initialized.");
-
     }
     catch (const std::exception& e) {
         std::cerr << e.what() << std::endl;
@@ -360,7 +329,7 @@ int main(int argc, char* argv[]) {
         std::cout << "Start timer..." << std::endl;
         auto start = std::chrono::high_resolution_clock::now();
 
-        serverLogic(expRuns, num_procs, seedStarter);
+        serverLogic(expRuns, seedStarter, num_procs);
 
         std::cout << "End timer..." << std::endl;
         auto end = std::chrono::high_resolution_clock::now();
