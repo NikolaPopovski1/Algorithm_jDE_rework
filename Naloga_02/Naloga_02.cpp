@@ -5,12 +5,20 @@
 #include <cmath>
 #include <random>
 #include <mpi.h>
+#include <omp.h>
 #include <atomic>
 
 #define MESSAGE_TAG 1
 #define MESSAGE_RECV_TAG 2
 #define SERVER_RANK 0
 #define EXIT_SEED -1
+
+struct FakeTuple {
+    int rez_seed;
+    int rez_nFes;
+    float rez_energy;
+    float rez_duration;
+};
 
 #ifndef M_PI
 #define M_PI 3.1415926f
@@ -22,9 +30,8 @@ constexpr const float epsilon = (float)1e-6;
 
 std::string aminoAcids;
 static unsigned int seedStarter, nFesLmt, runtimeLmt, expRuns, np, expThreads, numOfNodes;
-static std::atomic<int> atomicInt = 0;
-static float target, F, Cr;
 std::tuple<int, int, float, float> result;
+static float target;
 
 struct Solution {
     std::vector<float> xThetas;
@@ -98,96 +105,108 @@ std::tuple<int, int, float, float> calculateSeedEnergy(int seedSend) {
 	int seed = seedSend;
     Solution sol, u, uNew;
     Solution* populationCurrGen = new Solution[np];
+    Solution* populationNextGen = new Solution[np];
     std::uniform_real_distribution<float> float_dist(0.f, 1.f);
     std::uniform_int_distribution<int> int_dist_np(0, static_cast<int>(np - 1));
     std::uniform_int_distribution<int> int_dist_d(0, static_cast<int>(aminoAcids.size() - 1));
     unsigned int bestEnergy, nFesCounter, r1, r2, r3, rBest, jRand;
     float tmp, randomValue;
+    static float F, Cr;
+    omp_set_num_threads(expThreads);
 
-    while (true) {
-        int currentSeed = atomicInt.fetch_add(1);
-        if (currentSeed > expRuns - 1) break;
+    bestEnergy = nFesCounter = 0;
+    std::mt19937 gen(seed);
+    auto randFloat0To1 = [&]() { return float_dist(gen); };
+    auto randFloatNp = [&]() { return int_dist_np(gen); };
+    auto randIntD = [&]() { return int_dist_d(gen); };
 
-        bestEnergy = nFesCounter = 0;
-        std::mt19937 gen(currentSeed + seed);
-        auto randFloat0To1 = [&]() { return float_dist(gen); };
-        auto randFloatNp = [&]() { return int_dist_np(gen); };
-        auto randIntD = [&]() { return int_dist_d(gen); };
+    auto start = std::chrono::high_resolution_clock::now();
+    auto now = std::chrono::high_resolution_clock::now();
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
+    for (unsigned int i = 0; i < np; i++) {
+        sol = Solution();
+        sol.F = 0.5f;
+        sol.Cr = 0.9f;
 
-        auto start = std::chrono::high_resolution_clock::now();
-        auto now = std::chrono::high_resolution_clock::now();
-        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
-        for (unsigned int i = 0; i < np; i++) {
-            sol = Solution();
-            sol.F = 0.5f;
-            sol.Cr = 0.9f;
-
+        sol.xThetas.push_back(XjL + 2 * XjU * randFloat0To1());
+        for (int j = 3; j < aminoAcids.size(); j++) {
             sol.xThetas.push_back(XjL + 2 * XjU * randFloat0To1());
-            for (int j = 3; j < aminoAcids.size(); j++) {
-                sol.xThetas.push_back(XjL + 2 * XjU * randFloat0To1());
-                sol.xBetas.push_back(XjL + 2 * XjU * randFloat0To1());
-            }
-
-            /* // for testing
-            sol.xThetas = {0.7556,  0.0503, -0.8505,  0.0011,  0.2203,  1.1535, -0.1118,  0.1564,    0.1536,  0.0390,  1.2929};
-            sol.xBetas = { -0.1156,  0.0230, -1.8169,  2.7985, -3.0959,  -0.3611,  0.4678,  2.2303,  2.9020,  0.1797};
-            */
-
-            sol.energy = energyCalculation(aminoAcids, sol);
-            populationCurrGen[i] = sol;
-            nFesCounter++;
+            sol.xBetas.push_back(XjL + 2 * XjU * randFloat0To1());
         }
-        rBest = 0;
-        while (elapsed_ms <= runtimeLmt && nFesCounter <= nFesLmt) {
-            now = std::chrono::high_resolution_clock::now();
-            elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
-            for (unsigned int i = 0; i < np; i++) {
-                u = Solution();
 
-                randomValue = randFloat0To1();
-                if (randomValue < 0.1) F = 0.1f + 0.9f * randomValue;
-                else F = populationCurrGen[i].F;
+        /* // for testing
+        sol.xThetas = {0.7556,  0.0503, -0.8505,  0.0011,  0.2203,  1.1535, -0.1118,  0.1564,    0.1536,  0.0390,  1.2929};
+        sol.xBetas = { -0.1156,  0.0230, -1.8169,  2.7985, -3.0959,  -0.3611,  0.4678,  2.2303,  2.9020,  0.1797};
+        */
 
-                randomValue = randFloat0To1();
-                if (randomValue < 0.1) Cr = randomValue;
-                else Cr = populationCurrGen[i].Cr;
+        sol.energy = energyCalculation(aminoAcids, sol);
+        populationCurrGen[i] = sol;
+        nFesCounter++;
+    }
+    rBest = 0;
+    while (elapsed_ms <= runtimeLmt && nFesCounter <= nFesLmt) {
+        now = std::chrono::high_resolution_clock::now();
+        elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
+        
+        for (unsigned int i = 0; i < np; i++) {
+            u = Solution();
 
-                r1 = r2 = r3 = i;
-                while (r1 == i) r1 = randFloatNp();
-                while (r2 == i || r2 == r1) r2 = randFloatNp();
-                while (r3 == i || r3 == r1 || r3 == r2) r3 = randFloatNp();
+            randomValue = randFloat0To1();
+            if (randomValue < 0.1) F = 0.1f + 0.9f * randomValue;
+            else F = populationCurrGen[i].F;
 
-                jRand = randIntD();
-                // then go through for all thetas
-                for (int j = 0; j < aminoAcids.size() - 2; j++) {
-                    if (randFloat0To1() < Cr || j == jRand) {
-                        u.xThetas.push_back(populationCurrGen[r3].xThetas[j] + F * (populationCurrGen[r1].xThetas[j] - populationCurrGen[r2].xThetas[j]));
-                        if (u.xThetas[j] <= XjL) u.xThetas[j] = 2 * XjU + u.xThetas[j];
-                        if (u.xThetas[j] > XjU) u.xThetas[j] = 2 * XjL + u.xThetas[j];
-                    }
-                    else u.xThetas.push_back(populationCurrGen[i].xThetas[j]);
+            randomValue = randFloat0To1();
+            if (randomValue < 0.1) Cr = randomValue;
+            else Cr = populationCurrGen[i].Cr;
+
+            r1 = r2 = r3 = i;
+            while (r1 == i) r1 = randFloatNp();
+            while (r2 == i || r2 == r1) r2 = randFloatNp();
+            while (r3 == i || r3 == r1 || r3 == r2) r3 = randFloatNp();
+
+            jRand = randIntD();
+            // then go through for all thetas
+            for (int j = 0; j < aminoAcids.size() - 2; j++) {
+                if (randFloat0To1() < Cr || j == jRand) {
+                    populationCurrGen[i].xThetas.push_back(populationCurrGen[r3].xThetas[j] + F * (populationCurrGen[r1].xThetas[j] - populationCurrGen[r2].xThetas[j]));
+                    if (populationCurrGen[i].xThetas[j] <= XjL) populationCurrGen[i].xThetas[j] = 2 * XjU + populationCurrGen[i].xThetas[j];
+                    if (populationCurrGen[i].xThetas[j] > XjU) populationCurrGen[i].xThetas[j] = 2 * XjL + populationCurrGen[i].xThetas[j];
                 }
-                // then go through for all betas
-                for (int j = 0; j < aminoAcids.size() - 3; j++) {
-                    if (randFloat0To1() < Cr || j == jRand) {
-                        u.xBetas.push_back(populationCurrGen[r3].xBetas[j] + F * (populationCurrGen[r1].xBetas[j] - populationCurrGen[r2].xBetas[j]));
-                        if (u.xBetas[j] <= XjL) u.xBetas[j] = 2 * XjU + u.xBetas[j];
-                        if (u.xBetas[j] > XjU) u.xBetas[j] = 2 * XjL + u.xBetas[j];
-                    }
-                    else u.xBetas.push_back(populationCurrGen[i].xBetas[j]);
+                else populationCurrGen[i].xThetas.push_back(populationCurrGen[i].xThetas[j]);
+            }
+            // then go through for all betas
+            for (int j = 0; j < aminoAcids.size() - 3; j++) {
+                if (randFloat0To1() < Cr || j == jRand) {
+                    populationCurrGen[i].xBetas.push_back(populationCurrGen[r3].xBetas[j] + F * (populationCurrGen[r1].xBetas[j] - populationCurrGen[r2].xBetas[j]));
+                    if (populationCurrGen[i].xBetas[j] <= XjL) populationCurrGen[i].xBetas[j] = 2 * XjU + populationCurrGen[i].xBetas[j];
+                    if (populationCurrGen[i].xBetas[j] > XjU) populationCurrGen[i].xBetas[j] = 2 * XjL + populationCurrGen[i].xBetas[j];
                 }
-                u.energy = energyCalculation(aminoAcids, u);
-                nFesCounter++;
+                else populationCurrGen[i].xBetas.push_back(populationCurrGen[i].xBetas[j]);
+            }
+        }
 
-                if (u.energy <= populationCurrGen[i].energy) {
+
+        static std::atomic<int> i = 0;
+        static std::atomic<bool> endLoop = false;
+        while (endLoop) {
+            #pragma omp parallel for
+            {
+                if (i >= np) {
+                    endLoop.store(true);
+                    #pragma omp cancel for
+                }
+                #pragma omp cancellation point for 
+
+                populationNextGen[i].energy = energyCalculation(aminoAcids, populationCurrGen[i]);
+                if (populationCurrGen[i].energy <= populationCurrGen[i].energy) {
                     uNew = Solution();
                     for (int j = 0; j < aminoAcids.size() - 2; j++) {
-                        uNew.xThetas.push_back(populationCurrGen[r3].xThetas[j] + 0.5f * (u.xThetas[j] - populationCurrGen[i].xThetas[j]));
+                        uNew.xThetas.push_back(populationCurrGen[r3].xThetas[j] + 0.5f * (populationCurrGen[i].xThetas[j] - populationCurrGen[i].xThetas[j]));
                         if (uNew.xThetas[j] <= XjL) uNew.xThetas[j] = 2 * XjU + uNew.xThetas[j];
                         if (uNew.xThetas[j] > XjU) uNew.xThetas[j] = 2 * XjL + uNew.xThetas[j];
                     }
                     for (int j = 0; j < aminoAcids.size() - 3; j++) {
-                        uNew.xBetas.push_back(populationCurrGen[r3].xBetas[j] + 0.5f * (u.xBetas[j] - populationCurrGen[i].xBetas[j]));
+                        uNew.xBetas.push_back(populationCurrGen[r3].xBetas[j] + 0.5f * (populationCurrGen[i].xBetas[j] - populationCurrGen[i].xBetas[j]));
                         if (uNew.xBetas[j] <= XjL) uNew.xBetas[j] = 2 * XjU + uNew.xBetas[j];
                         if (uNew.xBetas[j] > XjU) uNew.xBetas[j] = 2 * XjL + uNew.xBetas[j];
                     }
@@ -195,43 +214,48 @@ std::tuple<int, int, float, float> calculateSeedEnergy(int seedSend) {
                     uNew.energy = energyCalculation(aminoAcids, uNew);
                     nFesCounter++;
 
-                    if (uNew.energy <= u.energy) {
-                        populationCurrGen[i].xThetas = uNew.xThetas;
-                        populationCurrGen[i].xBetas = uNew.xBetas;
-                        populationCurrGen[i].energy = uNew.energy;
-                        populationCurrGen[i].Cr = Cr;
-                        populationCurrGen[i].F = F;
-                    }
-                    else {
-                        populationCurrGen[i].xThetas = u.xThetas;
-                        populationCurrGen[i].xBetas = u.xBetas;
-                        populationCurrGen[i].energy = u.energy;
-                    }
+                    
                 }
+                i.fetch_add(1);
             }
-
-            tmp = populationCurrGen[0].energy;
-            for (unsigned int j = 1; j < np; j++) {
-                if (tmp > populationCurrGen[j].energy) {
-                    rBest = j;
-                    tmp = populationCurrGen[j].energy;
-                }
-            }
-            bestEnergy = rBest;
-            
-            if (populationCurrGen[rBest].energy <= target + epsilon && populationCurrGen[rBest].energy >= target + epsilon) break;
         }
 
-        auto end = std::chrono::high_resolution_clock::now();
+		for (unsigned int forI = 0; forI < np; forI++) {
+            if (populationNextGen[i].energy <= u.energy) {
+                populationCurrGen[i].xThetas = populationNextGen[i].xThetas;
+                populationCurrGen[i].xBetas = populationNextGen[i].xBetas;
+                populationCurrGen[i].energy = populationNextGen[i].energy;
+                populationCurrGen[i].Cr = Cr;
+                populationCurrGen[i].F = F;
+            }
+            else {
+                populationCurrGen[i].xThetas = populationCurrGen[i].xThetas;
+                populationCurrGen[i].xBetas = populationCurrGen[i].xBetas;
+                populationCurrGen[i].energy = populationCurrGen[i].energy;
+            }
+		}
 
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-        //std::cout << currentSeed + seed << " " << populationCurrGen[bestEnergy].energy << " " << nFesCounter << " " << duration << '\n';
-        //std::cout << "Speed (nFes / duration = speed): " << nFesCounter << " / " << duration << " = " << nFesCounter/duration << '\n';
-
-
-        std::tuple<int, int, float, float> seedVals(currentSeed + seed, nFesCounter, populationCurrGen[bestEnergy].energy, duration);
-		result = seedVals;
+        tmp = populationCurrGen[0].energy;
+        for (unsigned int j = 1; j < np; j++) {
+            if (tmp > populationCurrGen[j].energy) {
+                rBest = j;
+                tmp = populationCurrGen[j].energy;
+            }
+        }
+        bestEnergy = rBest;
+            
+        if (populationCurrGen[rBest].energy <= target + epsilon && populationCurrGen[rBest].energy >= target + epsilon) break;
     }
+
+    auto end = std::chrono::high_resolution_clock::now();
+
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    //std::cout << currentSeed + seed << " " << populationCurrGen[bestEnergy].energy << " " << nFesCounter << " " << duration << '\n';
+    //std::cout << "Speed (nFes / duration = speed): " << nFesCounter << " / " << duration << " = " << nFesCounter/duration << '\n';
+
+
+    std::tuple<int, int, float, float> seedVals(seed, nFesCounter, populationCurrGen[bestEnergy].energy, duration);
+	result = seedVals;
 
     delete[] populationCurrGen;
 
@@ -244,7 +268,8 @@ void serverLogic(int expRunsInner, int starting_seed, int num_procs_original) {
         i = starting_seed, 
         limit = starting_seed + expRunsInner,
         client;
-	std::tuple<int, int, float, float> resultPlaceholder;
+    std::tuple<int, int, float, float> resultPlaceholder;
+    std::vector<std::tuple<int, int, float, float>> results(expRunsInner);
     
     // poslje enega po enega, clienta do clienta in tako enakomerno porazdeli
 	while (i < limit) {
@@ -263,26 +288,13 @@ void serverLogic(int expRunsInner, int starting_seed, int num_procs_original) {
         client;
     MPI_Status status;
 
-    int rez_seed, rez_nFes;
-    float rez_energy, rez_duration;
+    i = starting_seed;
     while (i < limit) {
         for (client = 1; client < num_procs_original; client++) {
-            MPI_Recv(&resultPlaceholder, sizeof(resultPlaceholder), MPI_BYTE, MPI_ANY_SOURCE, MESSAGE_RECV_TAG, MPI_COMM_WORLD, &status);
+            MPI_Recv(&resultPlaceholder, sizeof(resultPlaceholder), MPI_BYTE, client, MESSAGE_RECV_TAG, MPI_COMM_WORLD, &status);
 
-            rez_seed = std::get<0>(resultPlaceholder);
-            rez_nFes = std::get<1>(resultPlaceholder);
-            rez_energy = std::get<2>(resultPlaceholder);
-            rez_duration = std::get<3>(resultPlaceholder);
+			results[i - 1] = resultPlaceholder;
 
-            // Print the values
-            std::string output =
-                "Seed: " + std::to_string(rez_seed)
-                + ", nFes: " + std::to_string(rez_nFes)
-                + ", energy: " + std::to_string(rez_energy)
-                + ", duration: " + std::to_string(rez_duration)
-                + "\n";
-            
-            std::cout << output << std::endl;
             i++;
             if (i >= limit) break;
         }
@@ -293,6 +305,25 @@ void serverLogic(int expRunsInner, int starting_seed, int num_procs_original) {
 		i = -1;
 		MPI_Send(&i, 1, MPI_INT, client, MESSAGE_TAG, MPI_COMM_WORLD);
 	}
+
+    int rez_seed, rez_nFes;
+    float rez_energy, rez_duration;
+	for (int i = 0; i < results.size(); i++) {
+        rez_seed = std::get<0>(results[i]);
+        rez_nFes = std::get<1>(results[i]);
+        rez_energy = std::get<2>(results[i]);
+        rez_duration = std::get<3>(results[i]);
+
+        // Print the values
+        std::string output =
+            "Seed: " + std::to_string(rez_seed)
+            + ", nFes: " + std::to_string(rez_nFes)
+            + ", energy: " + std::to_string(rez_energy)
+            + ", duration: " + std::to_string(rez_duration)
+            + "\n";
+
+        std::cout << output << std::endl;
+    }
 }
 
 void clientLogic(int rank, int num_procs_original, int expRuns, int starting_seed) {
@@ -302,12 +333,12 @@ void clientLogic(int rank, int num_procs_original, int expRuns, int starting_see
     int i = 0;
 
 	while (true) {
-		MPI_Recv(&seed_gotten, 1, MPI_INT, SERVER_RANK, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+		MPI_Recv(&seed_gotten, 1, MPI_INT, SERVER_RANK, MESSAGE_TAG, MPI_COMM_WORLD, &status);
 		if (seed_gotten == -1) break;
-        //std::cout << "Rank " << rank << " pridobil seed: " << seed_gotten << std::endl;
+        std::cout << "Rank " << rank << " pridobil seed: " << seed_gotten << std::endl;
 		auto seedEnergy = calculateSeedEnergy(seed_gotten);
 
-        MPI_Send(&seedEnergy, sizeof(seedEnergy), MPI_CHAR, SERVER_RANK, MESSAGE_RECV_TAG, MPI_COMM_WORLD);
+        MPI_Send(&seedEnergy, sizeof(seedEnergy), MPI_BYTE, SERVER_RANK, MESSAGE_RECV_TAG, MPI_COMM_WORLD);
     }
     //MPI_Send(&EXIT_SEED, 1, MPI_INT, SERVER_RANK, MESSAGE_TAG, MPI_COMM_WORLD);
 }
