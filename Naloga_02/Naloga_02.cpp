@@ -143,7 +143,7 @@ std::tuple<int, int, float, float> calculateSeedEnergy(int seedSend) {
         populationCurrGen[i] = sol;
         nFesCounter++;
     }
-    std::cout << "Seu skozi inicializacijo seedov!" << std::endl;
+    // std::cout << "Seu skozi inicializacijo seedov!" << std::endl;
     rBest = 0;
     while (elapsed_ms <= runtimeLmt && nFesCounter <= nFesLmt) {
         now = std::chrono::high_resolution_clock::now();
